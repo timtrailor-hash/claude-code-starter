@@ -39,8 +39,20 @@ print(json.dumps({
 
 # Pattern 1: Commands touching LaunchAgent/LaunchDaemon plist files
 if echo "$COMMAND" | grep -qE '(Library/LaunchAgents|Library/LaunchDaemons)'; then
-    # Allow read-only commands straight through
-    if echo "$COMMAND" | grep -qE '^(cat |ls |plutil -p |plutil -lint |head |tail |wc |file |stat |md5 |shasum )'; then
+    # Allow read-only commands straight through. `find` and `grep` are
+    # read-only when not paired with -delete/-exec rm; `launchctl print`
+    # and `launchctl list` are always read-only.
+    if echo "$COMMAND" | grep -qE '^(cat |ls |plutil -p |plutil -lint |head |tail |wc |file |stat |md5 |shasum |grep |find )'; then
+        if echo "$COMMAND" | grep -qE 'find\s.*(-delete|-exec\s+rm)'; then
+            ask "find ... -delete / -exec rm on LaunchAgent path. Approve to proceed."
+        fi
+        exit 0
+    fi
+    # Allow launchctl print/list even when the pipeline also touches
+    # Library/LaunchAgents (e.g. combined with find). State-changing
+    # launchctl verbs still fall through to Pattern 2 below.
+    if echo "$COMMAND" | grep -qE 'launchctl\s+(list|print)' && \
+       ! echo "$COMMAND" | grep -qE 'launchctl\s+(bootstrap|bootout|kickstart|load|unload|enable|disable|setenv|unsetenv)'; then
         exit 0
     fi
     ask "Command writes to LaunchAgent/LaunchDaemon plist. Approve to proceed."

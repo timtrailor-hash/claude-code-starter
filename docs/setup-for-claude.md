@@ -154,7 +154,7 @@ Write a `~/.claude/settings.json` with the MCP launchers the user selected. Exam
 ```json
 {
   "permissions": {
-    "allow": ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+    "allow": ["Bash", "Bash(*)", "Read", "Write", "Edit", "Glob", "Grep"]
   },
   "mcpServers": {
     "memory": {
