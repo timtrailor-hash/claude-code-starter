@@ -1,0 +1,48 @@
+# CLAUDE.md — project-level session rules (auto-loaded every session)
+
+<!--
+Copy this file to CLAUDE.md in your project root and edit.
+Claude Code reads it at session start. Keep it under about 200 lines.
+-->
+
+## What this project is
+
+<!-- One or two sentences. What you are building. Who uses it. -->
+
+## Hard rules for this project
+
+<!-- Rules Claude must never break. Be explicit and specific. Examples below; delete and write your own. -->
+
+- Never write to the production database from this session. Run against the staging copy or ask first.
+- Do not commit anything under `/secrets/`. The pre-commit hook blocks this, but belt-and-braces.
+- All new API endpoints require corresponding integration tests before merging.
+
+## Key paths and commands
+
+<!-- Where things live; commands you run a lot. -->
+
+- Source: `./src`
+- Tests: `./tests`
+- Run tests: `pytest -xvs`
+- Start dev server: `make dev`
+
+## Memory
+
+Memory files live at `~/.claude/projects/-Users-<you>-<project>/memory/`.
+- `topics/` — curated facts per topic.
+- `lessons.md` — accumulated error patterns, reviewed at session start.
+
+## Rule priority
+
+```
+~/.claude/rules/*.md  → Hard safety (auto-loaded globally)
+CLAUDE.md             → This file (auto-loaded per project)
+topics/*.md           → Canonical details loaded on demand
+```
+
+## Operational defaults
+
+- Prefer editing existing files to creating new ones.
+- No performative modesty in writing; state positions directly.
+- If about to do something risky or hard to reverse, ask first.
+- Log every significant mistake to `topics/lessons.md` with the root-cause-analysis shape from operational rules.

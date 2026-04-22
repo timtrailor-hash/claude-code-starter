@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+
+# macOS
+.DS_Store
+
+# Secrets (never commit)
+credentials.py
+.keychain_pass
+*.p8
+*.pem
+google_token.json
+*.crt
+*.key
+
+# Local state
+*.sqlite
+*.db
+.memory/
+chroma_db/
+memory_server_data/
+
+# Logs
+*.log
+
+# Editor
+.vscode/settings.json
+.idea/
+
+# Build artefacts
+.astro/

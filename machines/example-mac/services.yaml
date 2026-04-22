@@ -1,0 +1,31 @@
+# Service manifest — single source of truth for persistent services on this host.
+#
+# Every entry here must exist as a LaunchAgent plist in ./launchagents/.
+# `verify.sh` cross-checks this list against what `launchctl list` reports on
+# the live system, and fails if they drift.
+#
+# This file is a template. Replace the entries below with your own services.
+# The two example entries demonstrate the structure; delete them before
+# running a real deploy.
+
+services:
+
+  memory-server:
+    purpose: "Dual-tier semantic + keyword search over session history"
+    owner: memory_server.py
+    mode: stdio  # started by Claude Code as MCP, not a LaunchAgent
+    python: /opt/homebrew/bin/python3.11
+    code: <PATH_TO>/memory-server/memory_server.py
+    secrets: []
+    failure_mode: "YELLOW — memory search unavailable, Claude sessions still work"
+    auto_fix: false
+
+  example-daily-job:
+    purpose: "Example LaunchAgent stub — replace with a real one or delete"
+    owner: your-script.sh
+    mode: StartCalendarInterval  # e.g. 03:00 daily
+    interval: "0 3 * * *"
+    code: <PATH_TO>/scripts/your-script.sh
+    secrets: []
+    failure_mode: "YELLOW — example only"
+    auto_fix: false

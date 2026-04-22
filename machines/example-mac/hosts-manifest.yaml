@@ -1,0 +1,24 @@
+# Host manifest — declares what this host should and should not have.
+# `verify.sh` enforces this against the live filesystem.
+#
+# Replace the entries below with your own policy.
+
+host: example-mac
+
+allowed_launchagents:
+  # List every com.example.* label you expect to see loaded.
+  # Anything else is rogue.
+  - com.example.memory-indexer
+
+required_files:
+  - path: ~/.claude/hooks/credential_leak_hook.sh
+    reason: "PreToolUse credential-leak guard"
+  - path: ~/.claude/hooks/validate_hooks.sh
+    reason: "SessionStart configuration integrity check"
+
+forbidden_files:
+  # Anything that must never be on disk (example below — delete if not relevant).
+  - path: ~/.keychain_pass
+    reason: "Plaintext keychain password file; opt-in hardware-convenience for a headless host only"
+    # Remove this entry if you are running a headless host and have deliberately
+    # opted in to storing the keychain password in this file.
