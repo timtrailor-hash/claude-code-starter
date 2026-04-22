@@ -51,6 +51,14 @@ Both are needed. Semantic search misses exact strings. Keyword search misses con
 
 Canonical facts (not conversation history) live in per-topic Markdown files under a `topics/` directory. These are curated by you, not by the indexer, and they are version-controlled. The `/dream` skill proposes updates to these but does not write to them directly without approval.
 
+### Feedback memory files
+
+A specific usage pattern worth calling out: keep a set of `topics/feedback_*.md` files that record behavioural corrections you give Claude. "Don't ever give me a time estimate." "Translate git vocabulary into plain English before asking me to make a decision." "School docs backups are by design not mirrored to Drive, stop flagging them." Each one is a single file with a rule, a reason, and a "how to apply" line.
+
+The reason this matters: corrections given inline in a session are forgotten the moment the session closes. A file in `topics/` is loaded into the system context at session start, so the rule survives. The rule of thumb is: if you catch yourself giving Claude the same correction twice, save it as a feedback memory the second time. Over a few months you end up with twenty or thirty of these, and they shape the agent's default behaviour without you having to re-state your preferences every session.
+
+The starter kit ships zero of these by design. They are inherently personal. What it ships is the pattern — a `topics/` directory, a memory server that loads it, and a `/dream` skill that proposes updates.
+
 ## The control plane
 
 `deploy.sh`, `verify.sh`, `rollback.sh`, and `diff-live.sh` together make your Claude Code configuration behave like a deployed system rather than a pile of files in `~/.claude/`.
@@ -78,6 +86,20 @@ If `verify.sh` returns green, these tests passed. If it returns red, you have a 
 - **Subject-matter-specific skills.** Anything that is about my particular work context is not portable.
 - **Memory content.** You start with an empty memory. You fill it.
 - **iOS companion app.** Separate repository; the Claude Code side does not depend on it.
+
+## If you build a UI layer on top of a terminal session
+
+A specific lesson worth repeating if you end up, as I did, building a mobile or desktop app that relays taps into a tmux or terminal-backed session. The surface failure mode looks innocuous. Your app shows "Allow / Deny" buttons above the keyboard. The user taps Allow. A keystroke goes down the wire into the terminal. Claude Code reads the keystroke and proceeds.
+
+Then Claude issues a new permission prompt with identical choices immediately after. Your app re-renders the same three buttons for the new prompt. To the user, nothing appears to have changed since the last tap. They tap Allow again, thinking the first tap did not register. The keystroke arrives at a point where the new prompt is not yet the focused input, so it lands in the terminal as a literal character. Now the user's message box contains a stray digit they did not type. Trust in the UI collapses.
+
+The fix is a monotonic prompt id the server assigns each time a fresh prompt opens. The app sends the id along with the tap. The server rejects any tap carrying a stale id. The app hides the buttons optimistically on tap and only shows a bar again when the server announces a new id. Three small pieces, each one structural:
+
+1. Monotonic id generator on the server, bumped on the transition from "no prompt" to "prompt open."
+2. Client includes the current id in every action.
+3. Server validates the id and returns a 409 on mismatch. Client reverts its optimistic hide on 409.
+
+This pattern generalises to any UI that relays user intent into a system whose state is changing faster than the user can perceive. The specific code lives in my conversation server (not in this starter kit because the plumbing is tightly coupled to my SwiftUI app), but the pattern itself is cheap, standard, and worth reaching for the moment you notice your users tapping twice because they are not sure the first tap landed.
 
 ## The pattern to take away
 
