@@ -101,6 +101,43 @@ The fix is a monotonic prompt id the server assigns each time a fresh prompt ope
 
 This pattern generalises to any UI that relays user intent into a system whose state is changing faster than the user can perceive. The specific code lives in my conversation server (not in this starter kit because the plumbing is tightly coupled to my SwiftUI app), but the pattern itself is cheap, standard, and worth reaching for the moment you notice your users tapping twice because they are not sure the first tap landed.
 
+## If your hooks write to an audit log
+
+If a hook records to a shared audit file (`~/.claude/printer_audit.log` is my example), and your scenario test suite exercises the hook with malicious-looking payloads to verify the blocks fire, you have a second problem to solve: keep test-generated entries out of the production log.
+
+Today's concrete failure mode: every `git commit` in my control-plane repo triggered pre-commit pytest, which ran the printer-safety scenario tests, which invoked the real hook against fake `FIRMWARE_RESTART` URLs. The hook correctly blocked them, and correctly logged `BLOCKED_ALWAYS` to the production audit file. Result: the production log filled with entries indistinguishable from a real attacker attempting to kill active prints.
+
+The fix is one line on each side. In the hook, read the log file path from an environment variable with a default:
+
+```python
+LOG_FILE = os.environ.get("AUDIT_LOG_PATH", os.path.expanduser("~/.claude/audit.log"))
+```
+
+In the test runner, set the override to a scratch path:
+
+```python
+test_env["AUDIT_LOG_PATH"] = "/tmp/test_audit.log"
+proc = subprocess.run(["bash", hook_path], env=test_env, ...)
+```
+
+Now test runs leave zero trace in the production log. Any real entry is a real attempt. If you skip this and rely on "the test is rare, the noise is fine," you lose the signal the log exists to provide.
+
+## If your local hooks fire on SSH commands
+
+If you have pre-flight hooks that grep the command text for risky patterns (paths to `~/Library/LaunchAgents`, writes to `/etc/`, and so on), add a clause at the top that short-circuits on `ssh ` and `scp ` prefixes. A local hook has no jurisdiction over a remote machine, and scanning the SSH payload for local-path names generates false positives that silently break workflows.
+
+Concrete example from today: installing a LaunchAgent on a second machine via `ssh host "launchctl load ~/Library/LaunchAgents/foo.plist"` kept hitting the Mac Mini's local safety hook because the command text mentions the LaunchAgents path. The remote machine has its own hooks; the local machine was not going to be touched by that command. The fix is three lines:
+
+```bash
+if echo "$COMMAND" | grep -qE '^(ssh |scp )'; then
+    # Printer-IP-specific patterns still fire here (dangerous gcode over SSH),
+    # but everything else defers to the remote's own hooks.
+    exit 0
+fi
+```
+
+The principle: a safety hook should match its own machine's risk surface, not string-match arbitrary text that happens to mention a sensitive path.
+
 ## The pattern to take away
 
 If you take only one thing from this repository, take the principle that **text rules fail under pressure and structural enforcement is the fix.** The specific hooks here are examples of that pattern applied to specific cases I cared about. Your own hooks will look different because your priorities are different. What should survive is the commitment to turn every repeated failure into a piece of code, a macro, a test, or a hook that makes the failure structurally impossible the next time.

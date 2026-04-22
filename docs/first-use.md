@@ -61,6 +61,43 @@ The first time this feels like ceremony. After a week it feels like a seatbelt.
 - **Memory searches return nothing relevant.** Check the indexer is running and pointing at the correct project directory. First indexing can take several minutes.
 - **`verify.sh` fails on a deploy.** The rollback script has already run. Look at the pytest output to see what failed, fix it, deploy again.
 
+## Reducing permission prompts once you trust your hooks
+
+Claude Code asks for approval before many tool calls. That is the right default for a fresh setup because your hooks have not been exercised yet. After a few weeks of real use, when you have seen your hooks block the things they should and allow the things they should, the prompts become noise rather than safety.
+
+When you reach that point, open `~/.claude/settings.json` and add inside the `permissions` block:
+
+```json
+"defaultMode": "bypassPermissions"
+```
+
+This changes the default for tool calls from "prompt the user" to "proceed automatically." Crucially, it does NOT disable your hooks. A hook that returns a `deny` decision still blocks the operation. A hook that returns `ask` is what becomes automatic. Your printer-safety hook continues to block `FIRMWARE_RESTART` no matter what your default mode says.
+
+The trust curve matters here. Start in the default mode. Watch what your hooks do. When you have a month of logs showing the hooks catching the right things, flip the setting. If you notice Claude doing things you did not authorise, flip it back and add a new hook.
+
+## If you run Claude Code on more than one machine
+
+Your memory folder (`topics/` and `MEMORY.md`) is version-controlled, which means two machines can stay in sync via `git pull`. The starter kit's SessionStart hook pulls memory on every session start, but if you want fresher sync (say, you save a feedback memory on the desktop and want it live on the laptop within minutes rather than "the next time you open Claude Code there"), add a LaunchAgent to pull every 15 minutes.
+
+A sketch of the script:
+
+```bash
+#!/bin/bash
+# memory_git_pull.sh
+set -uo pipefail
+MEM="$HOME/.claude/projects/<your-project>/memory"
+cd "$MEM" || exit 0
+git fetch --quiet 2>/dev/null || exit 0
+BEHIND=$(git rev-list --count HEAD..@{upstream} 2>/dev/null || echo 0)
+AHEAD=$(git rev-list --count @{upstream}..HEAD 2>/dev/null || echo 0)
+DIRTY=$(git status --porcelain | wc -l | tr -d ' ')
+if [ "$BEHIND" -gt 0 ] && [ "$AHEAD" -eq 0 ] && [ "$DIRTY" -eq 0 ]; then
+    git pull --ff-only --quiet
+fi
+```
+
+Run it every 15 minutes via a LaunchAgent with `StartInterval: 900`. Only pulls on a clean fast-forwardable state — never touches your in-progress edits. If you have a real merge conflict, it sits out and lets you resolve it manually at the next session start.
+
 ## What to build next
 
 Look at what you do repeatedly in Claude Code sessions. If you find yourself typing the same multi-step instruction more than three times, that is a skill waiting to be written. Put it in `~/.claude/skills/<yourname>/SKILL.md`. The file format is a YAML-headed Markdown document; look at `/review` or `/debate` in this repository for the shape.
