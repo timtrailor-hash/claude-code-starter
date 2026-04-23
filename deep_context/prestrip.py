@@ -104,11 +104,21 @@ def prestrip(jsonl_path: Path) -> dict:
             slug = rec.get("slug")
             is_sidechain = bool(rec.get("isSidechain", False))
         ts = rec.get("timestamp") or rec.get("created_at")
+        ts_ms = None
         if isinstance(ts, int):
-            if started_ms is None or ts < started_ms:
-                started_ms = ts
-            if ended_ms is None or ts > ended_ms:
-                ended_ms = ts
+            ts_ms = ts
+        elif isinstance(ts, str):
+            # Claude Code writes ISO strings like "2026-04-17T14:30:00.123Z"
+            try:
+                from datetime import datetime
+                ts_ms = int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000)
+            except (ValueError, TypeError):
+                pass
+        if ts_ms is not None:
+            if started_ms is None or ts_ms < started_ms:
+                started_ms = ts_ms
+            if ended_ms is None or ts_ms > ended_ms:
+                ended_ms = ts_ms
         msg = rec.get("message") or {}
         role = msg.get("role") or rec.get("type") or "unknown"
         content = msg.get("content")

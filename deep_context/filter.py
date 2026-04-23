@@ -38,7 +38,10 @@ def _fts_query(conn: sqlite3.Connection, brief: str, limit: int = 60) -> list[st
     return [r[0] for r in rows]
 
 
-def _time_window(conn: sqlite3.Connection, days: int, limit: int = 200) -> list[str]:
+def _time_window(conn: sqlite3.Connection, days: int, limit: int = 5000) -> list[str]:
+    """Sessions started within the last `days` days. Default limit is high
+    enough that a full corpus fits — the intent of this filter is a date range,
+    not a top-N cap. If you have >5000 sessions, raise the limit."""
     cutoff = _iso_window_start(days)
     rows = conn.execute(
         "SELECT session_id FROM meta WHERE started >= ? ORDER BY started DESC LIMIT ?",
@@ -108,18 +111,30 @@ def prefilter(brief: str,
         conn.close()
     sem_ids = set(_semantic(brief))
 
-    # Union, but weight: include (fts ∪ sem ∪ topic ∪ file) unconditionally,
-    # and recent time window as context. If union is empty, fall back to time.
+    # Trust relevance hits unconditionally — a session flagged by FTS,
+    # semantic, topic, or file overlap is relevant regardless of recency.
+    # Time window only acts as the fallback for briefs with no relevance hits.
     relevance = fts_ids | sem_ids | topic_ids | file_ids
-    if not relevance:
-        union = time_ids
-    else:
-        # keep only time-windowed relevance, plus top recent if we have room
-        union = relevance & time_ids if time_ids else relevance
+    if relevance:
+        union = relevance
+        # Pad with recent sessions if the relevance set is small, so the
+        # aggregator has some contextual ballast even on narrow briefs.
         if len(union) < 20 and time_ids:
             union = union | set(list(time_ids)[:20])
+    else:
+        union = time_ids
 
-    candidates = list(union)[:max_candidates]
+    # Rank candidates: relevance-hit sessions first (by how many sources
+    # surfaced them), then fill with recent ones.
+    def _rank(sid: str) -> int:
+        score = 0
+        if sid in fts_ids: score += 3
+        if sid in sem_ids: score += 3
+        if sid in topic_ids: score += 2
+        if sid in file_ids: score += 4
+        return -score  # negative for descending sort
+
+    candidates = sorted(union, key=_rank)[:max_candidates]
     return {
         "brief": brief,
         "window_days": window_days,
