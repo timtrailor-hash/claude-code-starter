@@ -3,14 +3,16 @@
 Input: the brief, fan-out agent outputs (JSON), and optional raw re-reads.
 Output: a single context.md with citations.
 
-This is deliberately a *deterministic* aggregator, not another model call.
-The fan-out agents already distilled the content; the aggregator just
-structures + deduplicates + tags provenance.
+v2: the raw-reread stage is no longer a stub. For each flagged session,
+the aggregator invokes Claude with the pre-stripped transcript and extracts
+brief-relevant claims that the compressed summary may have missed.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 from . import prestrip, filter as dc_filter
@@ -39,6 +41,91 @@ def _dedupe_claims(claims: list[dict]) -> list[dict]:
 
 def _cite(sources: list[str]) -> str:
     return " ".join(f"[{s}]" for s in sources if s)
+
+
+def _find_raw_jsonl(session_id: str) -> Path | None:
+    """Find the raw JSONL for a session id under ~/.claude/projects/."""
+    projects = Path.home() / ".claude" / "projects"
+    if not projects.exists():
+        return None
+    for cand in projects.rglob(f"{session_id}*.jsonl"):
+        if cand.is_file():
+            return cand
+    # Try first-8 prefix match if full id is given
+    if len(session_id) >= 8:
+        short = session_id[:8]
+        for cand in projects.rglob(f"{short}*.jsonl"):
+            if cand.is_file():
+                return cand
+    return None
+
+
+def _extract_from_raw(brief: str, session_id: str, max_claims: int = 10) -> list[dict]:
+    """Targeted retrieval from a raw session JSONL.
+
+    Pre-strips the transcript, asks Claude for claims that are both
+    relevant to the brief AND likely missing from a short compressed summary.
+    Returns [{claim, source}] tagged with raw:<id>.
+    """
+    raw = _find_raw_jsonl(session_id)
+    if not raw:
+        return []
+    try:
+        stripped = prestrip.prestrip(raw)
+        transcript = prestrip.format_for_compression(stripped, max_chars=300_000)
+    except Exception:
+        return []
+
+    # Invoke the Claude CLI — reuse the compress._run_claude-style env to pick up
+    # whichever auth the parent session has.
+    prompt = (
+        f"You are extracting claims from a session transcript that are RELEVANT to a specific brief.\n\n"
+        f"BRIEF: {brief}\n\n"
+        f"Read the transcript. Extract up to {max_claims} claims that:\n"
+        f"1. Are directly relevant to the brief.\n"
+        f"2. Are SPECIFIC — include exact identifiers (file paths, line numbers, commit SHAs, error strings, commands).\n"
+        f"3. Are load-bearing — a future session doing this work would genuinely want them.\n\n"
+        f"Return ONLY a JSON array: [{{\"claim\": \"...\"}}, ...]. No preamble, no explanation.\n\n"
+        f"TRANSCRIPT:\n{transcript}\n"
+    )
+
+    env = os.environ.copy()
+    env.pop("ANTHROPIC_API_KEY", None)
+    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
+    env.setdefault("HOME", str(Path.home()))
+    claude_bin = "/opt/homebrew/bin/claude"
+    if not Path(claude_bin).exists():
+        claude_bin = str(Path.home() / ".local" / "bin" / "claude")
+    try:
+        proc = subprocess.run(
+            [claude_bin, "--print", "--model", "sonnet", "--tools", "",
+             "--disable-slash-commands"],
+            input=prompt, env=env, capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode != 0:
+            return []
+        out = proc.stdout.strip()
+    except Exception:
+        return []
+
+    # Strip fences and find JSON array
+    if out.startswith("```"):
+        out = "\n".join(out.splitlines()[1:-1])
+    start = out.find("[")
+    end = out.rfind("]") + 1
+    if start == -1 or end <= start:
+        return []
+    try:
+        items = json.loads(out[start:end])
+    except Exception:
+        return []
+
+    short = session_id[:8]
+    return [
+        {"claim": it["claim"].strip(), "source": f"raw:{short}"}
+        for it in items
+        if isinstance(it, dict) and it.get("claim")
+    ][:max_claims]
 
 
 def aggregate(brief: str,
@@ -77,13 +164,24 @@ def aggregate(brief: str,
         for ff in files:
             sections["files"].append({"claim": str(ff), "sources": [layer]})
 
-    # Incorporate raw re-reads if provided — these are high-fidelity additions
+    # v2: real raw-reread — targeted extraction from the raw JSONL for each
+    # flagged session. The compressed summary is lossy by design; this stage
+    # recovers specifics (error strings, exact commands, line-level detail)
+    # when the fan-out flagged a session as worth deeper reading.
     raw_claims: list[dict] = []
     for sid in (raw_reread_session_ids or []):
-        raw_claims.append({
-            "claim": f"Raw transcript re-read for session {sid} — see raw JSONL for full fidelity.",
-            "source": f"raw:{sid}",
-        })
+        sid = sid.strip()
+        if not sid:
+            continue
+        claims = _extract_from_raw(brief, sid)
+        if claims:
+            raw_claims.extend(claims)
+        else:
+            # Fall back to a placeholder so the citation link is at least present
+            raw_claims.append({
+                "claim": f"Raw transcript re-read for session {sid} did not surface additional claims.",
+                "source": f"raw:{sid[:8]}",
+            })
     sections["sessions"] += _dedupe_claims(raw_claims)
 
     # Assemble markdown

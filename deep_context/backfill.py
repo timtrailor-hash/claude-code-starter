@@ -16,16 +16,12 @@ from pathlib import Path
 
 from . import compress, index, prestrip
 
-# Claude Code stores session JSONLs under ~/.claude/projects/<cwd-slug>/*.jsonl.
-# The default discovers every project subdir on this machine. Override with
-# --roots if you only want to backfill a subset.
-PROJECTS_ROOT = Path.home() / ".claude" / "projects"
-
-
-def _default_roots() -> list[Path]:
-    if not PROJECTS_ROOT.exists():
-        return []
-    return sorted(p for p in PROJECTS_ROOT.iterdir() if p.is_dir())
+DEFAULT_ROOTS = [
+    Path.home() / ".claude" / "projects" / "-Users-timtrailor-Documents-Claude-code",
+    Path.home() / ".claude" / "projects" / "-Users-timtrailor-code",
+    Path.home() / ".claude" / "projects" / "-Users-timtrailor-code-claude-mobile",
+    Path.home() / ".claude" / "projects" / "-Users-timtrailor",
+]
 
 
 def _discover(roots: list[Path]) -> list[Path]:
@@ -54,7 +50,7 @@ def _is_main_session(p: Path) -> bool:
 
 
 def run(args):
-    roots = [Path(r) for r in args.roots] if args.roots else _default_roots()
+    roots = [Path(r) for r in args.roots] if args.roots else DEFAULT_ROOTS
     jsonls = _discover(roots)
     if args.limit:
         jsonls = jsonls[: args.limit]

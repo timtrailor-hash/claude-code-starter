@@ -1,14 +1,12 @@
 """Unified index for compressed-session markdown files.
 
 One compressed session → one row in a dedicated FTS5 table + one embedding
-in a dedicated ChromaDB collection. Kept in its own collection so
-/deep-context queries don't compete with any raw-JSONL memory index you
-may already be running.
+in a dedicated ChromaDB collection. Kept separate from the memory_server's
+raw-JSONL index so /deep-context queries don't compete with /search_memory.
 """
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from pathlib import Path
 
@@ -16,15 +14,10 @@ import chromadb
 
 from . import schema
 
-
-def _deep_context_home() -> Path:
-    return Path(os.environ.get("DEEP_CONTEXT_HOME") or (Path.home() / ".claude" / "deep-context"))
-
-
-DATA_DIR = _deep_context_home()
+DATA_DIR = Path.home() / "code" / "memory_server_data"
 CHROMA_DIR = DATA_DIR / "chroma"
 FTS_PATH = DATA_DIR / "compressed_fts.db"
-COLLECTION_NAME = "compressed_sessions"
+COLLECTION_NAME = "compressed_sessions_v2"  # v2 uses fresh collection; v1 retained for rollback
 
 _client = None
 _collection = None

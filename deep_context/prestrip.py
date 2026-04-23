@@ -151,7 +151,7 @@ def prestrip(jsonl_path: Path) -> dict:
     }
 
 
-def format_for_compression(stripped: dict, max_chars: int = 400_000) -> str:
+def format_for_compression(stripped: dict, max_chars: int = 600_000) -> str:
     """Render the stripped session into a single prompt-ready string.
 
     Hard cap at max_chars so a runaway session can't blow the model context.

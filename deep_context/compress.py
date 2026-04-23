@@ -1,9 +1,6 @@
 """Compress a single session JSONL into a validated compressed-session markdown file.
 
-Invokes the Claude CLI in non-interactive mode. By default uses subscription
-OAuth inherited from the parent Claude Code session; set ANTHROPIC_API_KEY
-in the environment to use API-key auth instead (routes compression to paid
-API tokens).
+Uses the Claude CLI via subscription (shared_utils.env_for_claude_cli()). Never uses API keys.
 """
 from __future__ import annotations
 
@@ -19,29 +16,27 @@ from pathlib import Path
 from . import prestrip, classify, schema  # noqa: E402
 
 
-def _deep_context_home() -> Path:
-    return Path(os.environ.get("DEEP_CONTEXT_HOME") or (Path.home() / ".claude" / "deep-context"))
-
-
 def _env_for_cli() -> dict:
     """Env for claude CLI subprocess.
 
-    Inherits the parent's env so subscription OAuth propagates from an
-    authenticated Claude Code session or a GUI login. Keeps CLAUDECODE /
-    CLAUDE_CODE_ENTRYPOINT so the CLI recognises the parent context.
+    Inherits the parent's env (so subscription OAuth propagates from an
+    authenticated Claude Code session or a GUI login). Strips ANTHROPIC_API_KEY
+    to guarantee subscription auth per Tim's rule — API key would bypass the
+    subscription and bill per-token.
 
-    If you want compression to go through the paid API instead of your
-    subscription, set ANTHROPIC_API_KEY in the environment before running.
-    The CLI will pick it up automatically.
+    Unlike shared_utils.env_for_claude_cli, this does NOT strip CLAUDECODE /
+    CLAUDE_CODE_ENTRYPOINT — keeping them lets the CLI recognise the parent
+    context. shared_utils'\''s version is for detached daemons; compression
+    runs inline in an authenticated session.
     """
     env = os.environ.copy()
+    env.pop("ANTHROPIC_API_KEY", None)
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
     env.setdefault("HOME", str(Path.home()))
     return env
 
-
 PROMPT_PATH = Path(__file__).parent / "prompts" / "compress.md"
-SESSIONS_ROOT = _deep_context_home() / "sessions"
+SESSIONS_ROOT = Path.home() / "code" / "memory_server_data" / "sessions"
 MANIFEST_PATH = SESSIONS_ROOT / "_manifest.jsonl"
 
 SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -119,8 +114,10 @@ def _render_trivial(meta: dict, stripped: dict) -> str:
         f"## Goal\n{goal}\n\n"
         "## Decisions\n- none\n\n"
         "## Outcome\nshipped\n\n"
-        "## Failed attempts\n- none\n\n"
+        "## Superseded approaches\n- none\n\n"
         "## Unresolved\n- none\n\n"
+        "## Identifiers\n- none\n\n"
+        "## Key exchanges\n- none\n\n"
         "## Links\n"
         f"- sessions: [{meta['session_id']}]\n"
         "- topics: []\n"
@@ -145,10 +142,6 @@ CLAUDE_BIN_CANDIDATES = (
 
 
 def _claude_bin() -> str:
-    import shutil
-    on_path = shutil.which("claude")
-    if on_path:
-        return on_path
     for c in CLAUDE_BIN_CANDIDATES:
         if Path(c).exists():
             return c
@@ -156,12 +149,11 @@ def _claude_bin() -> str:
 
 
 def _run_claude(model: str, prompt: str, transcript: str, timeout: int = 600) -> str:
-    """Invoke Claude CLI in non-interactive mode.
+    """Invoke Claude CLI in non-interactive mode with subscription auth.
 
-    Uses whatever auth the parent session has: subscription OAuth by default,
-    API key if ANTHROPIC_API_KEY is set. --bare is deliberately NOT used — it
-    disables keychain reads and forces API-key auth, which breaks subscription
-    compression.
+    --bare is NOT used: it forces API-key auth and disables keychain reads,
+    which conflicts with Tim's subscription-only rule. Normal mode keeps
+    subscription OAuth from the login keychain.
 
     --tools "" disables all tools so the model only emits text.
     --disable-slash-commands blocks accidental skill invocation.
@@ -226,6 +218,16 @@ def compress_session(jsonl_path: Path, force: bool = False, dry_run: bool = Fals
 
     model, flags = classify.classify(stripped)
 
+    # v2: dynamic token budget — max(800, min(3500, raw_bytes * 0.002))
+    raw_bytes = stripped.get("raw_bytes", 0)
+    budget_tokens = max(800, min(3500, int(raw_bytes * 0.002)))
+
+    # v2: route to Opus when budget >2000 OR any complexity flag OR keyword match
+    if budget_tokens > 2000 and model == "sonnet":
+        model = "opus"
+        if "budget" not in flags:
+            flags = flags + ["budget"]
+
     meta = {
         "schema_version": schema.SCHEMA_VERSION,
         "session_id": session_id,
@@ -239,6 +241,7 @@ def compress_session(jsonl_path: Path, force: bool = False, dry_run: bool = Fals
         "compression_timestamp": datetime.now(timezone.utc)
         .isoformat(timespec="seconds").replace("+00:00", "Z"),
         "complexity_flags": flags,
+        "target_tokens": budget_tokens,
     }
 
     target = _target_path(started_iso, stripped["slug"] or "session", session_id)
@@ -279,9 +282,15 @@ def compress_session(jsonl_path: Path, force: bool = False, dry_run: bool = Fals
             return entry
 
     prompt = PROMPT_PATH.read_text()
-    # Inject the "as provided" metadata directly into the prompt to reduce hallucination
+    # Inject metadata and budget into the prompt
     meta_block = "\n".join(f"- {k}: {v}" for k, v in meta.items())
-    prompt = prompt + f"\n\n## Metadata to copy verbatim into frontmatter\n{meta_block}\n"
+    budget_hint = (
+        f"\n\n## Target budget\n"
+        f"Aim for approximately {budget_tokens} tokens of output for this session "
+        f"(hard cap {schema.TOKEN_CAP}). Use the budget to preserve identifiers and "
+        f"quote load-bearing turns — do not pad, but do not under-extract either."
+    )
+    prompt = prompt + f"\n\n## Metadata to copy verbatim into frontmatter\n{meta_block}\n" + budget_hint
     transcript = prestrip.format_for_compression(stripped)
 
     out = _run_claude(model, prompt, transcript)
@@ -290,11 +299,9 @@ def compress_session(jsonl_path: Path, force: bool = False, dry_run: bool = Fals
     if out.startswith("```") and out.endswith("```"):
         lines = out.splitlines()
         out = "\n".join(lines[1:-1]).strip()
-    # Find the real frontmatter by locating `---\n*schema_version:` — works
-    # whether or not there's preamble, and skips spurious leading `---` blocks.
+    # Find the real frontmatter by locating `---\n*schema_version:`
     sv_idx = out.find("schema_version:")
     if sv_idx != -1:
-        # Back up to the preceding `---\n`
         prefix = out[:sv_idx]
         delim = prefix.rfind("---")
         if delim != -1:
@@ -302,10 +309,10 @@ def compress_session(jsonl_path: Path, force: bool = False, dry_run: bool = Fals
     debug_path = target.with_suffix(".raw.txt")
     out = out.strip() + "\n"
 
+    # v2: identifier-preservation validation uses the source transcript.
     try:
-        fm = schema.validate(out)
+        fm = schema.validate(out, source_text=transcript)
     except schema.ValidationError as e:
-        # Preserve raw model output so we can see what went wrong
         target.parent.mkdir(parents=True, exist_ok=True)
         debug_path.write_text(out)
         entry = {

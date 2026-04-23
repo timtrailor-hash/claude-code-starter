@@ -61,8 +61,8 @@ def cmd_validate(args):
 
 
 def cmd_emit_schema(args):
-    from . import schema, compress as _c
-    out = Path(args.out) if args.out else _c.SESSIONS_ROOT / "_schema.json"
+    from . import schema
+    out = Path(args.out) if args.out else Path.home() / "code" / "memory_server_data" / "sessions" / "_schema.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     schema.write_schema_json(out)
     print(f"wrote {out}")

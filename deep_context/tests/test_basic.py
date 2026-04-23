@@ -20,7 +20,7 @@ def test_schema_rejects_missing_frontmatter():
 def test_schema_rejects_missing_sections():
     bad = (
         "---\n"
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "session_id: abc\n"
         "started: 2026-04-23T12:00:00Z\n"
         "ended: 2026-04-23T12:30:00Z\n"
@@ -48,7 +48,7 @@ def test_schema_rejects_missing_sections():
 def test_schema_accepts_valid():
     good = (
         "---\n"
-        "schema_version: 1\n"
+        "schema_version: 2\n"
         "session_id: abc\n"
         "started: 2026-04-23T12:00:00Z\n"
         "ended: 2026-04-23T12:30:00Z\n"
@@ -66,8 +66,10 @@ def test_schema_accepts_valid():
         "## Goal\nTest.\n\n"
         "## Decisions\n- none\n\n"
         "## Outcome\nshipped\n\n"
-        "## Failed attempts\n- none\n\n"
+        "## Superseded approaches\n- none\n\n"
         "## Unresolved\n- none\n\n"
+        "## Identifiers\n- none\n\n"
+        "## Key exchanges\n- none\n\n"
         "## Links\n- none\n"
     )
     fm = schema.validate(good)
