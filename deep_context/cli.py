@@ -43,6 +43,8 @@ def cmd_aggregate(args):
         fanout_path=Path(args.fanout),
         out_path=Path(args.out),
         raw_reread_session_ids=raw_ids,
+        synthesise=args.synthesise,
+        synthesise_model=args.synthesise_model,
     )
     print(json.dumps(result, indent=2))
     return 0
@@ -95,6 +97,10 @@ def main(argv=None):
     c.add_argument("--fanout", required=True)
     c.add_argument("--out", required=True)
     c.add_argument("--raw-reread", default="", help="comma-separated session_ids re-read from raw")
+    c.add_argument("--synthesise", action="store_true",
+                   help="run the synthesis pass (Opus call) after dedup — v3.1 default for insight briefs")
+    c.add_argument("--synthesise-model", default="opus",
+                   help="model for synthesis pass (default: opus)")
     c.set_defaults(func=cmd_aggregate)
 
     c = sub.add_parser("validate", help="validate a compressed-session MD file")

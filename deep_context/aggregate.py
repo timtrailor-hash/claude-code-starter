@@ -22,10 +22,14 @@ def _norm_claim(c: str) -> str:
     return re.sub(r"\s+", " ", c.strip()).rstrip(".").lower()
 
 
-def _dedupe_claims(claims: list[dict]) -> list[dict]:
-    """claims: [{claim: str, source: str}]. Merge duplicates, preserve multiple sources."""
+def _dedupe_claims(claims: list) -> list[dict]:
+    """claims: list of {claim: str, source: str} or plain strings. Merge dups."""
     buckets: dict[str, dict] = {}
     for c in claims:
+        if isinstance(c, str):
+            c = {"claim": c, "source": "?"}
+        elif not isinstance(c, dict) or "claim" not in c:
+            continue
         key = _norm_claim(c["claim"])
         if not key:
             continue
@@ -128,18 +132,101 @@ def _extract_from_raw(brief: str, session_id: str, max_claims: int = 10) -> list
     ][:max_claims]
 
 
+def _invoke_synthesizer(brief: str, structured_md: str, fanout_path: Path,
+                         model: str = "opus", timeout: int = 900) -> str | None:
+    """Run a synthesis pass: feed the brief + the deduplicated claims to an Opus
+    agent that produces a coherent root-cause narrative with named cross-cutting
+    patterns. The fan-out dedup is the raw material; synthesis is the deliverable.
+
+    Returns the synthesized markdown or None on failure.
+    """
+    synth_prompt = f"""You are the SYNTHESIS stage of /deep-context. A fan-out of parallel agents has produced a deduplicated claim set. Your job: turn it into a coherent root-cause synthesis that is directly actionable for a fresh session.
+
+BRIEF:
+{brief}
+
+DEDUPLICATED FAN-OUT (structured markdown with every claim preserved and provenance tagged):
+<<<FANOUT
+{structured_md}
+FANOUT>>>
+
+Produce a single markdown document with this structure:
+
+# Context for: {brief[:80]}...
+
+## Verdict on the brief's premise
+(2-4 sentences. Where the brief is right, where it needs correcting, the actual shape of the problem. Be direct.)
+
+## Root-cause synthesis — cross-cutting patterns
+(5-10 numbered patterns. Each: a memorable named insight, evidence (cite claims and session IDs that establish it), and why fixes keep failing because of it.)
+
+## Architecture as it actually is
+(Specific file:line, routes, hook names, flags. Distinguish layers if permission behaviour differs across them.)
+
+## Past fix timeline (chronological)
+(Commits with SHAs grouped into generations. What was tried, why it failed.)
+
+## Unresolved threads and contradictions
+(Flagged gaps, agent disagreements, drift between memory and current state.)
+
+## Files likely to touch
+(Deduplicated with line ranges.)
+
+## Methodology note
+(One paragraph on how this was produced.)
+
+## Citations
+_Provenance: [topic:<path>] | [session:<id>] | [code:<path>:<line>] | [settings:<path>]_
+
+QUALITY RULES:
+- Be direct. Correct the brief where evidence contradicts it.
+- Name patterns usefully and specifically.
+- Preserve every load-bearing commit SHA, file:line, error string, session ID.
+- Cap at 12K tokens (synthesis is the deliverable, not the raw source).
+
+Output only the document. No preamble."""
+
+    env = os.environ.copy()
+    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
+    env.setdefault("HOME", str(Path.home()))
+    claude_bin = "/opt/homebrew/bin/claude"
+    if not Path(claude_bin).exists():
+        claude_bin = str(Path.home() / ".local" / "bin" / "claude")
+    try:
+        proc = subprocess.run(
+            [claude_bin, "--print", "--model", model, "--tools", "",
+             "--disable-slash-commands"],
+            input=synth_prompt, env=env, capture_output=True, text=True, timeout=timeout,
+        )
+        if proc.returncode != 0:
+            return None
+        out = proc.stdout.strip()
+        if out.startswith("```"):
+            out = "\n".join(out.splitlines()[1:-1])
+        return out if out else None
+    except Exception:
+        return None
+
+
 def aggregate(brief: str,
               fanout_path: Path,
               raw_reread_session_ids: list[str] | None = None,
-              max_context_tokens: int = 50_000) -> dict:
+              max_context_tokens: int = 50_000,
+              synthesise: bool = False,
+              synthesise_model: str = "opus") -> dict:
     """Build context.md.
 
     fanout_path points to a JSON file with shape:
     {
-      "topics": {"summary": str, "claims": [{claim, source}], "flagged_sessions": []},
-      "sessions": {"summary": str, "claims": [{claim, source}], "flagged_sessions": []},
-      "code": {"summary": str, "claims": [{claim, source}]}
+      "topics":    {"summary": str, "claims": [...], "unresolved": [...], "files_likely": [...]},
+      "code":      {"summary": str, "claims": [...], "files_likely": [...]},
+      "sessions":  [                                 # v3: list, one entry per shard
+        {"summary": str, "claims": [...], "unresolved": [...]},
+        ...
+      ]
     }
+
+    Legacy v1/v2 form (sessions as a single object) is also accepted.
 
     Returns: {"context": str, "stats": {...}}.
     """
@@ -148,26 +235,49 @@ def aggregate(brief: str,
 
     sections = {"topics": [], "sessions": [], "code": [], "unresolved": [], "files": []}
 
-    for layer in ("topics", "sessions", "code"):
+    # Topics + code — single agents
+    for layer in ("topics", "code"):
         data = fanout.get(layer) or {}
         claims = data.get("claims") or []
         sections[layer] = _dedupe_claims(claims)
 
-    # Collect unresolved + files if fanout includes them separately
-    for layer in ("sessions", "topics"):
-        data = fanout.get(layer) or {}
-        unresolved = data.get("unresolved") or []
-        for u in unresolved:
+    # Sessions — v3 accepts a list of shard outputs; v1/v2 kept as single dict
+    sessions_raw = fanout.get("sessions") or {}
+    session_shards = sessions_raw if isinstance(sessions_raw, list) else [sessions_raw]
+    all_session_claims: list[dict] = []
+    all_session_unresolved: list[dict] = []
+    session_summaries: list[str] = []
+    for sh in session_shards:
+        if not isinstance(sh, dict):
+            continue
+        if sh.get("summary"):
+            session_summaries.append(sh["summary"].strip())
+        all_session_claims.extend(sh.get("claims") or [])
+        for u in sh.get("unresolved") or []:
+            if isinstance(u, dict):
+                all_session_unresolved.append({"claim": u.get("claim", str(u)),
+                                                "sources": [u.get("source", "sessions")]})
+            else:
+                all_session_unresolved.append({"claim": str(u), "sources": ["sessions"]})
+    sections["sessions"] = _dedupe_claims(all_session_claims)
+
+    # Unresolved + files from any layer
+    for u in all_session_unresolved:
+        sections["unresolved"].append(u)
+    topics_data = fanout.get("topics") or {}
+    for u in topics_data.get("unresolved") or []:
+        if isinstance(u, dict):
             sections["unresolved"].append({"claim": u.get("claim", str(u)),
-                                            "sources": [u.get("source", layer)]})
-        files = data.get("files_likely") or []
-        for ff in files:
+                                            "sources": [u.get("source", "topics")]})
+        else:
+            sections["unresolved"].append({"claim": str(u), "sources": ["topics"]})
+    for layer in ("topics", "code"):
+        data = fanout.get(layer) or {}
+        for ff in data.get("files_likely") or []:
             sections["files"].append({"claim": str(ff), "sources": [layer]})
 
-    # v2: real raw-reread — targeted extraction from the raw JSONL for each
-    # flagged session. The compressed summary is lossy by design; this stage
-    # recovers specifics (error strings, exact commands, line-level detail)
-    # when the fan-out flagged a session as worth deeper reading.
+    # v2-style raw-reread is vestigial in v3 (session agents already read raw).
+    # Keep the hook for back-compat: if the caller supplies flagged IDs, run it.
     raw_claims: list[dict] = []
     for sid in (raw_reread_session_ids or []):
         sid = sid.strip()
@@ -176,13 +286,8 @@ def aggregate(brief: str,
         claims = _extract_from_raw(brief, sid)
         if claims:
             raw_claims.extend(claims)
-        else:
-            # Fall back to a placeholder so the citation link is at least present
-            raw_claims.append({
-                "claim": f"Raw transcript re-read for session {sid} did not surface additional claims.",
-                "source": f"raw:{sid[:8]}",
-            })
-    sections["sessions"] += _dedupe_claims(raw_claims)
+    if raw_claims:
+        sections["sessions"] += _dedupe_claims(raw_claims)
 
     # Assemble markdown
     lines: list[str] = []
@@ -202,10 +307,10 @@ def aggregate(brief: str,
     lines.append("")
 
     lines.append("## Relevant history")
-    lines.append("_From compressed session summaries + raw re-reads — how we got here, what we tried, what failed._")
+    lines.append("_From raw session transcripts read across shards — how we got here, what we tried, what failed._")
     lines.append("")
-    if fanout.get("sessions", {}).get("summary"):
-        lines.append(fanout["sessions"]["summary"].strip())
+    if session_summaries:
+        lines.append(" ".join(session_summaries))
         lines.append("")
     for c in sections["sessions"]:
         lines.append(f"- {c['claim']} {_cite(c['sources'])}")
@@ -238,27 +343,41 @@ def aggregate(brief: str,
 
     context = "\n".join(lines).rstrip() + "\n"
 
-    # Rough token cap enforcement
+    # Rough token cap enforcement (raw deduplicated form)
     rough_tokens = int(len(context) / 4)
     truncated = False
     if rough_tokens > max_context_tokens:
-        # Truncate by character proportion
         target_chars = max_context_tokens * 4
         context = context[:target_chars] + f"\n\n_[truncated at {max_context_tokens} tokens]_\n"
         truncated = True
+
+    synthesised_context: str | None = None
+    if synthesise:
+        synthesised_context = _invoke_synthesizer(brief, context, fanout_path, model=synthesise_model)
 
     stats = {
         "claim_counts": {k: len(v) for k, v in sections.items()},
         "rough_tokens": rough_tokens,
         "truncated": truncated,
         "raw_reread_count": len(raw_reread_session_ids or []),
+        "synthesised": synthesised_context is not None,
     }
-    return {"context": context, "stats": stats}
+    return {"context": context, "synthesised_context": synthesised_context, "stats": stats}
 
 
 def write_context(brief: str, fanout_path: Path, out_path: Path,
-                  raw_reread_session_ids: list[str] | None = None) -> dict:
-    result = aggregate(brief, fanout_path, raw_reread_session_ids)
+                  raw_reread_session_ids: list[str] | None = None,
+                  synthesise: bool = False, synthesise_model: str = "opus") -> dict:
+    result = aggregate(brief, fanout_path, raw_reread_session_ids,
+                       synthesise=synthesise, synthesise_model=synthesise_model)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(result["context"])
-    return {"path": str(out_path), **result["stats"]}
+    # When synthesise is True, the synthesised file is the primary deliverable.
+    # Raw dedup is still written alongside as `<name>.raw.md` for audit trail.
+    if result.get("synthesised_context"):
+        out_path.write_text(result["synthesised_context"])
+        raw_path = out_path.with_suffix(".raw.md")
+        raw_path.write_text(result["context"])
+        return {"path": str(out_path), "raw_path": str(raw_path), **result["stats"]}
+    else:
+        out_path.write_text(result["context"])
+        return {"path": str(out_path), **result["stats"]}
