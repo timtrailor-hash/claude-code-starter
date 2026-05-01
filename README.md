@@ -8,7 +8,7 @@ This is not a product. There is no support. Expect to edit things.
 
 A working scaffold for treating Claude Code as a personal operating environment, not just a coding assistant. Specifically:
 
-- **Four core skills**: `/review`, `/debate`, `/autonomous`, `/dream`. Pre-commit reviews, three-way multi-model debates for high-stakes decisions, retry-loop runners for work that needs to complete while you are away, and periodic memory consolidation.
+- **Five core skills**: `/review`, `/debate`, `/autonomous`, `/dream`, `/deep-context`. Pre-commit reviews, three-way multi-model debates for high-stakes decisions, retry-loop runners for work that needs to complete while you are away, periodic memory consolidation, and pre-task context assembly that pre-builds a `context.md` from topics, a compressed layer of every past session, and the codebase before a high-stakes task starts.
 - **A set of generic hooks** that convert text rules into enforcement: credential-leak detection on file writes, protected-path guards, rename-guard, session-manifest tracking, config-integrity checks, a lint hook, and an audit log. These fire at the Claude Code lifecycle stages that matter.
 - **A memory server** with dual-tier semantic plus keyword search over your own session history. Empty on first run. Indexes as you use it.
 - **Control-plane shell**: `deploy.sh` with atomic deploys and auto-rollback, `verify.sh` with pytest scenarios that feed real Claude Code JavaScript Object Notation (JSON) payloads into hooks and assert correct allow/deny behaviour, plus `rollback.sh` and `diff-live.sh` for deployment hygiene.
@@ -75,13 +75,18 @@ If you want to see the full version of this setup, complete with my own content 
 ├── .claude/
 │   ├── hooks/                  Generic enforcement hooks
 │   ├── rules/                  Templates for operational and security rules
-│   ├── skills/                 /review /debate /autonomous /dream
+│   ├── skills/                 /review /debate /autonomous /dream /deep-context
 │   ├── mcp-launchers/          Keychain-backed Model Context Protocol (MCP) launchers
 │   └── agents/                 (empty, for your own subagents)
 ├── memory-server/              Dual-tier search memory system
 │   ├── memory_server.py
 │   ├── requirements.txt
 │   └── README.md
+├── deep_context/               Pre-task context-assembly pipeline (for /deep-context)
+│   ├── README.md
+│   ├── cli.py
+│   ├── compress.py
+│   └── ...
 ├── machines/
 │   └── example-mac/
 │       ├── services.yaml       Declare LaunchAgents here
